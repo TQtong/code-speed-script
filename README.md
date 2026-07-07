@@ -19,6 +19,8 @@ This repository contains the source files used to build a protected Start-Codex-
 - The launcher updates global Git proxy settings by default so Git GUI, command-line git, and IDE git can push and pull through the detected proxy.
 - Pass `-NoGlobalGitProxy` to skip the global Git proxy update.
 - Codex config is not modified unless `-UpdateConfig`, `-ReasoningEffort`, or `-ServiceTier` is passed.
+- The customer EXE saves a valid authorization code under the current user's local app data folder after the first successful activation.
+- Run the customer EXE with `--clear-license` to remove the saved authorization code and activate again.
 
 ## Build Notes
 

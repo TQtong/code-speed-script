@@ -169,6 +169,8 @@ internal static class DynamicLicensedCodexLauncher
     private const string ProductName = "__PRODUCT_NAME__";
     private const string Magic = "__MAGIC__";
     private const string MainScriptName = "Start-Codex-Final.ps1";
+    private const string LicenseDirectoryName = "Start-Codex-Final";
+    private const string LicenseFileName = "license.txt";
     private const string PublicKeyXml = __PUBLIC_KEY_XML__;
 
     private static readonly byte[] MaskedKey = FromBase64(
@@ -192,6 +194,7 @@ internal static class DynamicLicensedCodexLauncher
         bool verifyOnly = false;
         bool noPause = false;
         bool showMachineId = false;
+        bool clearLicense = false;
         List<string> forwardedArgs = new List<string>();
 
         for (int i = 0; i < args.Length; i++)
@@ -208,6 +211,10 @@ internal static class DynamicLicensedCodexLauncher
             {
                 showMachineId = true;
             }
+            else if (String.Equals(args[i], "--clear-license", StringComparison.OrdinalIgnoreCase))
+            {
+                clearLicense = true;
+            }
             else
             {
                 forwardedArgs.Add(args[i]);
@@ -222,15 +229,22 @@ internal static class DynamicLicensedCodexLauncher
             return 0;
         }
 
+        if (clearLicense)
+        {
+            DeleteSavedLicense();
+            Console.WriteLine("Saved authorization code was cleared.");
+            return 0;
+        }
+
         Console.WriteLine("Start-Codex-Final licensed launcher");
         Console.WriteLine("Machine ID: " + GetMachineId());
-        Console.Write("Authorization code: ");
-        string licenseCode = Console.ReadLine();
 
         string extractionDirectory = null;
         try
         {
+            string licenseCode = GetUsableLicenseCode();
             Dictionary<string, string> claims = ValidateLicense(licenseCode);
+            SaveLicenseCode(licenseCode);
             PrintLicenseSummary(claims);
 
             extractionDirectory = ExtractPayload();
@@ -270,6 +284,88 @@ internal static class DynamicLicensedCodexLauncher
             {
                 TryDeleteDirectory(extractionDirectory);
             }
+        }
+    }
+
+    private static string GetUsableLicenseCode()
+    {
+        string savedLicense = LoadSavedLicense();
+        if (!String.IsNullOrWhiteSpace(savedLicense))
+        {
+            try
+            {
+                ValidateLicense(savedLicense);
+                Console.WriteLine("Using saved authorization code.");
+                return savedLicense.Trim();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Saved authorization code is no longer valid: " + ex.Message);
+                DeleteSavedLicense();
+            }
+        }
+
+        Console.Write("Authorization code: ");
+        string enteredLicense = Console.ReadLine();
+        if (String.IsNullOrWhiteSpace(enteredLicense))
+        {
+            throw new InvalidDataException("Authorization code is empty.");
+        }
+        return enteredLicense.Trim();
+    }
+
+    private static string GetLicensePath()
+    {
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (String.IsNullOrWhiteSpace(localAppData))
+        {
+            localAppData = Path.GetTempPath();
+        }
+        return Path.Combine(localAppData, LicenseDirectoryName, LicenseFileName);
+    }
+
+    private static string LoadSavedLicense()
+    {
+        string path = GetLicensePath();
+        try
+        {
+            if (File.Exists(path))
+            {
+                return File.ReadAllText(path, Encoding.UTF8).Trim();
+            }
+        }
+        catch
+        {
+        }
+        return "";
+    }
+
+    private static void SaveLicenseCode(string licenseCode)
+    {
+        try
+        {
+            string path = GetLicensePath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllText(path, licenseCode.Trim(), Encoding.UTF8);
+        }
+        catch
+        {
+            Console.WriteLine("Warning: authorization code could not be saved for next launch.");
+        }
+    }
+
+    private static void DeleteSavedLicense()
+    {
+        try
+        {
+            string path = GetLicensePath();
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
         }
     }
 
