@@ -16,7 +16,8 @@ This repository contains the source files used to build a protected Start-Codex-
 - Proxy environment variables are set only for the launcher process and the Codex process it starts.
 - The launcher does not modify Windows system proxy settings.
 - The launcher does not write user or machine proxy environment variables.
-- The launcher does not change global Git proxy settings.
+- The launcher updates global Git proxy settings by default so Git GUI, command-line git, and IDE git can push and pull through the detected proxy.
+- Pass `-NoGlobalGitProxy` to skip the global Git proxy update.
 - Codex config is not modified unless `-UpdateConfig`, `-ReasoningEffort`, or `-ServiceTier` is passed.
 
 ## Build Notes
@@ -36,4 +37,3 @@ powershell -ExecutionPolicy Bypass -File .\packager\Build-DynamicLicensedCodexLa
   -PrivateKeyPath .\outputs\Start-Codex-Final-LicensePrivateKey.xml `
   -WorkingDirectory .\packager\dynamic-build
 ```
-

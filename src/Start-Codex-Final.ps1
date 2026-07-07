@@ -5,6 +5,7 @@ param(
     [switch]$NoConfig,
     [switch]$UpdateConfig,
     [switch]$NoProcessProxyEnv,
+    [switch]$NoGlobalGitProxy,
     [ValidateSet("low", "medium", "high", "xhigh")]
     [string]$ReasoningEffort = "medium",
     [string]$ServiceTier = "default",
@@ -380,6 +381,39 @@ function Clear-ProcessProxyEnv {
     }
 }
 
+function Set-GlobalGitProxy {
+    param([string]$Proxy)
+
+    $normalized = Normalize-ProxyEndpoint $Proxy
+    if (-not $normalized) {
+        Write-Host "Git proxy was not updated because the proxy endpoint is invalid."
+        return
+    }
+
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $git) {
+        $git = Get-Command git -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    if (-not $git) {
+        Write-Host "Git was not found. Skipping global Git proxy update."
+        return
+    }
+
+    & $git.Source config --global http.proxy $normalized
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to set global Git http.proxy."
+    }
+
+    & $git.Source config --global https.proxy $normalized
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to set global Git https.proxy."
+    }
+
+    Write-Host "Updated global Git proxy for Git GUI, command-line git, and IDE git:"
+    Write-Host "  http.proxy=$normalized"
+    Write-Host "  https.proxy=$normalized"
+}
+
 function Get-CodexExe {
     $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
     if (Test-Path -LiteralPath $configPath) {
@@ -509,7 +543,7 @@ function Get-ChromiumProxyArgument {
 Write-Host "Codex safe launcher"
 Write-Host "  This script does NOT modify Windows system proxy."
 Write-Host "  This script does NOT write user proxy environment variables."
-Write-Host "  This script does NOT change global Git proxy."
+Write-Host "  This script updates global Git proxy unless -NoGlobalGitProxy is set."
 Write-Host "  Proxy environment variables are set only for this launcher process and the Codex process it starts."
 Write-Host ""
 
@@ -531,6 +565,12 @@ if (-not $NoProcessProxyEnv) {
 } else {
     Write-Host "NoProcessProxyEnv was set. Clearing proxy environment variables for Codex child processes."
     Clear-ProcessProxyEnv
+}
+
+if (-not $NoGlobalGitProxy) {
+    Set-GlobalGitProxy -Proxy $proxy
+} else {
+    Write-Host "NoGlobalGitProxy was set. Skipping global Git proxy update."
 }
 
 $shouldUpdateConfig = $UpdateConfig -or
