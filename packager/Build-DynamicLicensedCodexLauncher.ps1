@@ -256,13 +256,6 @@ internal static class DynamicLicensedCodexLauncher
             }
 
             int exitCode = RunPowerShellScript(extractionDirectory, forwardedArgs);
-            if (!noPause && Environment.UserInteractive && !Console.IsInputRedirected)
-            {
-                Console.WriteLine();
-                Console.Write("Press any key to close...");
-                Console.ReadKey(true);
-                Console.WriteLine();
-            }
             return exitCode;
         }
         catch (Exception ex)

@@ -440,27 +440,130 @@ function Get-CodexExe {
 }
 
 function Get-CodexDesktopExe {
-    $running = Get-Process -Name Codex -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and (Test-Path -LiteralPath $_.Path) } |
+    $packages = Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending
+    foreach ($package in $packages) {
+        try {
+            $manifest = Get-AppxPackageManifest -Package $package -ErrorAction Stop
+            $manifestExecutable = $manifest.Package.Applications.Application |
+                Where-Object { $_.Executable } |
+                Select-Object -ExpandProperty Executable -First 1
+            if ($manifestExecutable) {
+                $relativePath = ([string]$manifestExecutable).Replace("/", "\")
+                $candidate = Join-Path $package.InstallLocation $relativePath
+                if (Test-Path -LiteralPath $candidate) {
+                    return $candidate
+                }
+            }
+        } catch {
+            # Fall back to known desktop entry points below.
+        }
+
+        foreach ($relativePath in @("app\Codex.exe", "app\ChatGPT.exe")) {
+            $candidate = Join-Path $package.InstallLocation $relativePath
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    $running = Get-Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ProcessName -in @("Codex", "ChatGPT") -and
+            $_.MainWindowHandle -ne 0 -and
+            $_.Path -and
+            $_.Path -notmatch '[\\/]resources[\\/]codex\.exe$' -and
+            (Test-Path -LiteralPath $_.Path)
+        } |
         Select-Object -First 1
     if ($running) {
         return $running.Path
     }
 
-    $package = Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($package) {
-        $candidate = Join-Path $package.InstallLocation "app\Codex.exe"
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
+    return $null
+}
+
+function Get-CodexAppUserModelId {
+    $packages = Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending
+    foreach ($package in $packages) {
+        try {
+            $manifest = Get-AppxPackageManifest -Package $package -ErrorAction Stop
+            $application = $manifest.Package.Applications.Application |
+                Where-Object { $_.Id -and $_.Executable } |
+                Select-Object -First 1
+            if ($application) {
+                return ("{0}!{1}" -f $package.PackageFamilyName, [string]$application.Id)
+            }
+        } catch {
+            # A direct executable launch remains available as a fallback.
         }
     }
 
-    $command = Get-Command Codex.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($command) {
-        return $command.Source
+    return $null
+}
+
+function Start-CodexPackagedApp {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppUserModelId,
+        [string[]]$ArgumentList
+    )
+
+    if (-not ("CodexLauncher.PackageApplicationActivator" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace CodexLauncher
+{
+    [ComImport]
+    [Guid("2E941141-7F97-4756-BA1D-9DECDE894A3D")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IApplicationActivationManager
+    {
+        [PreserveSig]
+        int ActivateApplication(
+            [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+            [MarshalAs(UnmanagedType.LPWStr)] string arguments,
+            uint options,
+            out uint processId);
     }
 
-    return $null
+    [ComImport]
+    [Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+    internal class ApplicationActivationManager
+    {
+    }
+
+    public static class PackageApplicationActivator
+    {
+        public static uint Activate(string appUserModelId, string arguments)
+        {
+            IApplicationActivationManager manager =
+                (IApplicationActivationManager)new ApplicationActivationManager();
+            try
+            {
+                uint processId;
+                int result = manager.ActivateApplication(appUserModelId, arguments, 0, out processId);
+                if (result < 0)
+                {
+                    Marshal.ThrowExceptionForHR(result);
+                }
+                return processId;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(manager);
+            }
+        }
+    }
+}
+'@
+    }
+
+    $arguments = @($ArgumentList | Where-Object { $_ }) -join " "
+    return [CodexLauncher.PackageApplicationActivator]::Activate($AppUserModelId, $arguments)
 }
 
 function Update-CodexConfig {
@@ -508,8 +611,36 @@ function Update-CodexConfig {
 }
 
 function Stop-CodexProcesses {
+    param([string]$DesktopExe)
+
+    $desktopFullPath = $null
+    $desktopDirectory = $null
+    if ($DesktopExe) {
+        try {
+            $desktopFullPath = [System.IO.Path]::GetFullPath($DesktopExe)
+            $desktopDirectory = [System.IO.Path]::GetDirectoryName($desktopFullPath)
+        } catch {
+            $desktopFullPath = $null
+            $desktopDirectory = $null
+        }
+    }
+
     $processes = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.ProcessName -in @("Codex", "codex")
+        $processPath = $null
+        try { $processPath = $_.Path } catch { $processPath = $null }
+        if (-not $processPath) { return $false }
+
+        if ($desktopFullPath -and $processPath -ieq $desktopFullPath) {
+            return $true
+        }
+
+        if ($desktopDirectory -and
+            [System.IO.Path]::GetDirectoryName($processPath) -ieq $desktopDirectory -and
+            [System.IO.Path]::GetFileName($processPath) -in @("Codex.exe", "ChatGPT.exe")) {
+            return $true
+        }
+
+        return $false
     }
 
     if (-not $processes) {
@@ -526,9 +657,8 @@ function Stop-CodexProcesses {
     $deadline = (Get-Date).AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 300
-        $left = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            $_.ProcessName -in @("Codex", "codex")
-        }
+        $processIds = @($processes | Select-Object -ExpandProperty Id)
+        $left = Get-Process -Id $processIds -ErrorAction SilentlyContinue
     } while ($left -and (Get-Date) -lt $deadline)
 }
 
@@ -590,6 +720,7 @@ if ($shouldUpdateConfig) {
 
 $codexExe = Get-CodexExe
 $codexDesktopExe = Get-CodexDesktopExe
+$codexAppUserModelId = Get-CodexAppUserModelId
 
 if ($Doctor) {
     Write-Host ""
@@ -604,7 +735,7 @@ if ($Doctor) {
 }
 
 if (-not $NoKill) {
-    Stop-CodexProcesses
+    Stop-CodexProcesses -DesktopExe $codexDesktopExe
 } else {
     Write-Host "NoKill was set. Existing Codex processes were left running."
     if (-not $NoLaunch) {
@@ -622,8 +753,16 @@ Write-Host "Launching Codex desktop app..."
 if ($codexDesktopExe) {
     $proxyArg = Get-ChromiumProxyArgument -Proxy $proxy
     $bypassArg = "--proxy-bypass-list=localhost;127.0.0.1;::1;<local>"
-    Start-Process -FilePath $codexDesktopExe -ArgumentList @($proxyArg, $bypassArg)
-    Write-Host "  $codexDesktopExe"
+    if ($codexAppUserModelId) {
+        $desktopProcessId = Start-CodexPackagedApp `
+            -AppUserModelId $codexAppUserModelId `
+            -ArgumentList @($proxyArg, $bypassArg)
+        Write-Host "  AppX: $codexAppUserModelId"
+        Write-Host "  Process ID: $desktopProcessId"
+    } else {
+        Start-Process -FilePath $codexDesktopExe -ArgumentList @($proxyArg, $bypassArg)
+        Write-Host "  $codexDesktopExe"
+    }
     Write-Host "  $proxyArg"
 } else {
     Start-Process -FilePath $codexExe -ArgumentList "app"
