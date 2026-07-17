@@ -7,7 +7,7 @@ This repository contains the source files used to build a protected Start-Codex-
 - `src/Start-Codex-Final.ps1` - Codex launcher script.
 - `src/Start-Codex-Final.cmd` - Windows command wrapper for the launcher script.
 - `packager/Build-DynamicLicensedCodexLauncher.ps1` - Builds the dynamically licensed customer EXE.
-- `packager/StartCodexLicenseGeneratorGui.cs` - Source for the GUI license generator.
+- `packager/StartCodexLicenseGeneratorGui.cs` - Source for the self-contained GUI license generator.
 - `packager/Build-ProtectedCodexLauncher.ps1` - Older fixed-code protected build script.
 
 ## Current Behavior
@@ -24,9 +24,9 @@ This repository contains the source files used to build a protected Start-Codex-
 
 ## Build Notes
 
-The build process generates files under `outputs/`, including customer EXEs, license tools, authorization codes, and the private signing key. Those generated files are intentionally ignored by Git.
+The final deliverables are two standalone executables under `outputs/`: the customer launcher and the license generator. Authorization-code TXT files may be kept separately when useful.
 
-Important: `Start-Codex-Final-LicensePrivateKey.xml` is the private license-signing key. Do not commit it, even to a private repository. Store it separately in a secure backup location.
+Important: the license generator contains the private signing key and must only be kept by the issuer. Give customers only the launcher EXE plus their authorization code. The build-time XML key is retained as a backup and must not be distributed or committed.
 
 ## Typical Build
 
@@ -35,7 +35,7 @@ powershell -ExecutionPolicy Bypass -File .\packager\Build-DynamicLicensedCodexLa
   -CmdPath .\src\Start-Codex-Final.cmd `
   -Ps1Path .\src\Start-Codex-Final.ps1 `
   -OutputExe .\outputs\Start-Codex-Final-Licensed.exe `
-  -LicenseGeneratorPath .\outputs\New-StartCodexLicense.ps1 `
-  -PrivateKeyPath .\outputs\Start-Codex-Final-LicensePrivateKey.xml `
+  -LicenseGeneratorPath .\outputs\StartCodexLicenseGenerator.exe `
+  -PrivateKeyPath .\work\secrets\Start-Codex-Final-LicensePrivateKey.xml `
   -WorkingDirectory .\packager\dynamic-build
 ```
