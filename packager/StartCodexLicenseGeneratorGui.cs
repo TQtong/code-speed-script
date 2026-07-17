@@ -9,7 +9,6 @@ using System.Windows.Forms;
 internal static class Program
 {
     private const string ProductName = "Start-Codex-Final";
-    private const string PrivateKeyFileName = "Start-Codex-Final-LicensePrivateKey.xml";
 
     [STAThread]
     private static void Main(string[] args)
@@ -300,15 +299,14 @@ internal sealed class LicenseGeneratorForm : Form
 
     private void RefreshPrivateKeyStatus()
     {
-        string keyPath = LicenseMaker.PrivateKeyPath;
-        if (File.Exists(keyPath))
+        if (LicenseMaker.HasEmbeddedPrivateKey)
         {
-            keyStatusLabel.Text = "私钥已就绪：" + keyPath;
+            keyStatusLabel.Text = "签名私钥已内嵌，生成器可独立运行";
             keyStatusLabel.ForeColor = Color.FromArgb(22, 101, 52);
         }
         else
         {
-            keyStatusLabel.Text = "缺少私钥文件：" + keyPath;
+            keyStatusLabel.Text = "生成器未内嵌签名私钥，请重新打包";
             keyStatusLabel.ForeColor = Color.FromArgb(185, 28, 28);
         }
     }
@@ -415,18 +413,15 @@ internal sealed class LicenseGeneratorForm : Form
 internal static class LicenseMaker
 {
     private const string ProductName = "Start-Codex-Final";
-    private const string PrivateKeyFileName = "Start-Codex-Final-LicensePrivateKey.xml";
+    private const string PrivateKeyXml = __PRIVATE_KEY_XML__;
 
-    public static string PrivateKeyPath
-    {
-        get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, PrivateKeyFileName); }
-    }
+    public static bool HasEmbeddedPrivateKey { get { return !String.IsNullOrWhiteSpace(PrivateKeyXml); } }
 
     public static LicenseResult Generate(string customer, string machineId, string expiresUtc)
     {
-        if (!File.Exists(PrivateKeyPath))
+        if (!HasEmbeddedPrivateKey)
         {
-            throw new FileNotFoundException("找不到私钥文件，请把私钥 XML 放在生成器同目录。", PrivateKeyPath);
+            throw new InvalidOperationException("生成器中没有内嵌私钥，请重新运行打包脚本。 ");
         }
 
         if (String.IsNullOrWhiteSpace(machineId))
@@ -458,7 +453,7 @@ internal static class LicenseMaker
         using (RSACryptoServiceProvider rsa = new RSACryptoServiceProvider(2048, csp))
         {
             rsa.PersistKeyInCsp = false;
-            rsa.FromXmlString(File.ReadAllText(PrivateKeyPath));
+            rsa.FromXmlString(PrivateKeyXml);
             signature = rsa.SignData(payloadBytes, CryptoConfig.MapNameToOID("SHA256"));
         }
 

@@ -856,10 +856,31 @@ if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
 }
 
+$generatorSourceTemplatePath = Join-Path $PSScriptRoot "StartCodexLicenseGeneratorGui.cs"
+if (-not (Test-Path -LiteralPath $generatorSourceTemplatePath)) {
+    throw "Missing GUI license generator source: $generatorSourceTemplatePath"
+}
+
+$generatorSourcePath = Join-Path $WorkingDirectory "StartCodexLicenseGenerator.Embedded.cs"
+$privateKeyXml = [System.IO.File]::ReadAllText($PrivateKeyPath)
+$privateKeyLiteral = ConvertTo-CSharpStringLiteral -Value $privateKeyXml
+$generatorSource = [System.IO.File]::ReadAllText($generatorSourceTemplatePath).
+    Replace("__PRIVATE_KEY_XML__", $privateKeyLiteral)
+[System.IO.File]::WriteAllText($generatorSourcePath, $generatorSource, $utf8NoBom)
+
+& $csc /nologo /target:winexe /platform:anycpu /optimize+ `
+    /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
+    /out:$LicenseGeneratorPath $generatorSourcePath
+if ($LASTEXITCODE -ne 0) {
+    throw "License generator compilation failed with exit code $LASTEXITCODE"
+}
+
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $OutputExe).Hash
+$generatorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $LicenseGeneratorPath).Hash
 [PSCustomObject]@{
     Exe = $OutputExe
     LicenseGenerator = $LicenseGeneratorPath
     PrivateKey = $PrivateKeyPath
     Sha256 = $hash
+    LicenseGeneratorSha256 = $generatorHash
 }
