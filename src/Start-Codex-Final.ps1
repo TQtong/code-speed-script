@@ -34,18 +34,22 @@ function Normalize-ProxyEndpoint {
         return Normalize-ProxyEndpoint -Endpoint $Matches.rest -SchemeHint $Matches.hint
     }
 
-    if ($value -match "^(?<scheme>https?|socks5?h?|socks)://(?<userinfo>[^@/]+@)?(?<host>[^/:]+):(?<port>\d+)(/.*)?$") {
+    if ($value -match "^(?<scheme>https?|socks5?h?|socks)://(?<userinfo>[^@/]+@)?(?<host>\[[^\]]+\]|[^/:]+):(?<port>\d+)(/.*)?$") {
         $scheme = $Matches.scheme.ToLowerInvariant()
-        if ($scheme -eq "socks") { $scheme = "socks5" }
         $userinfo = [string]$Matches.userinfo
-        return ("{0}://{1}{2}:{3}" -f $scheme, $userinfo, $Matches.host, $Matches.port)
+        $hostName = [string]$Matches.host
+        $port = [string]$Matches.port
+        if ($scheme -eq "socks") { $scheme = "socks5" }
+        return ("{0}://{1}{2}:{3}" -f $scheme, $userinfo, $hostName, $port)
     }
 
-    if ($value -match "^(?<host>[^/:=;]+):(?<port>\d+)$") {
+    if ($value -match "^(?<host>\[[^\]]+\]|[^/:=;]+):(?<port>\d+)$") {
+        $hostName = [string]$Matches.host
+        $port = [string]$Matches.port
         $scheme = $SchemeHint.ToLowerInvariant()
         if ($scheme -eq "socks") { $scheme = "socks5" }
-        if ($scheme -notmatch "^(https?|socks5?h?)$") { $scheme = "http" }
-        return ("{0}://{1}:{2}" -f $scheme, $Matches.host, $Matches.port)
+        if ($scheme -notin @("http", "https", "socks5", "socks5h", "socksh")) { $scheme = "http" }
+        return ("{0}://{1}:{2}" -f $scheme, $hostName, $port)
     }
 
     return $null
@@ -54,10 +58,13 @@ function Normalize-ProxyEndpoint {
 function Get-SystemProxyEndpoint {
     $settingsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
     $settings = Get-ItemProperty -Path $settingsPath -ErrorAction SilentlyContinue
-    if (-not $settings -or $settings.ProxyEnable -ne 1) {
+    if (-not $settings) {
         return $null
     }
 
+    # Proxy clients commonly leave ProxyServer populated while system proxy mode
+    # is disabled (for example while using TUN mode). The endpoint is only read
+    # here and is still validated by Test-ProxyEndpoint before it can be used.
     $proxyServer = [string]$settings.ProxyServer
     if ([string]::IsNullOrWhiteSpace($proxyServer)) {
         return $null
@@ -129,7 +136,8 @@ function Test-HttpConnectProxy {
     param(
         [string]$Proxy,
         [string]$TargetHost = "chatgpt.com",
-        [int]$TargetPort = 443
+        [int]$TargetPort = 443,
+        [int]$TimeoutMilliseconds = 1800
     )
 
     $normalized = Normalize-ProxyEndpoint $Proxy
@@ -147,13 +155,14 @@ function Test-HttpConnectProxy {
 
     $client = [System.Net.Sockets.TcpClient]::new()
     try {
-        $async = $client.BeginConnect($uri.Host, $uri.Port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne(1500)) { return $false }
+        $connectHost = $uri.Host -replace "^\[|\]$", ""
+        $async = $client.BeginConnect($connectHost, $uri.Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) { return $false }
         $client.EndConnect($async)
 
         $stream = $client.GetStream()
-        $stream.ReadTimeout = 1800
-        $stream.WriteTimeout = 1800
+        $stream.ReadTimeout = $TimeoutMilliseconds
+        $stream.WriteTimeout = $TimeoutMilliseconds
         $request = "CONNECT ${TargetHost}:${TargetPort} HTTP/1.1`r`nHost: ${TargetHost}:${TargetPort}`r`nProxy-Connection: close`r`n`r`n"
         $bytes = [System.Text.Encoding]::ASCII.GetBytes($request)
         $stream.Write($bytes, 0, $bytes.Length)
@@ -172,7 +181,10 @@ function Test-HttpConnectProxy {
 }
 
 function Test-SocksProxy {
-    param([string]$Proxy)
+    param(
+        [string]$Proxy,
+        [int]$TimeoutMilliseconds = 1800
+    )
 
     $normalized = Normalize-ProxyEndpoint $Proxy
     if (-not $normalized) { return $false }
@@ -189,13 +201,14 @@ function Test-SocksProxy {
 
     $client = [System.Net.Sockets.TcpClient]::new()
     try {
-        $async = $client.BeginConnect($uri.Host, $uri.Port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne(1500)) { return $false }
+        $connectHost = $uri.Host -replace "^\[|\]$", ""
+        $async = $client.BeginConnect($connectHost, $uri.Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) { return $false }
         $client.EndConnect($async)
 
         $stream = $client.GetStream()
-        $stream.ReadTimeout = 1800
-        $stream.WriteTimeout = 1800
+        $stream.ReadTimeout = $TimeoutMilliseconds
+        $stream.WriteTimeout = $TimeoutMilliseconds
         $hello = [byte[]](0x05, 0x01, 0x00)
         $stream.Write($hello, 0, $hello.Length)
         $reply = New-Object byte[] 2
@@ -209,7 +222,10 @@ function Test-SocksProxy {
 }
 
 function Test-ProxyEndpoint {
-    param([string]$Proxy)
+    param(
+        [string]$Proxy,
+        [int]$TimeoutMilliseconds = 1800
+    )
 
     $normalized = Normalize-ProxyEndpoint $Proxy
     if (-not $normalized) { return $false }
@@ -221,13 +237,13 @@ function Test-ProxyEndpoint {
     }
 
     if ($uri.Scheme -match "^socks") {
-        return Test-SocksProxy -Proxy $normalized
+        return Test-SocksProxy -Proxy $normalized -TimeoutMilliseconds $TimeoutMilliseconds
     }
 
-    return Test-HttpConnectProxy -Proxy $normalized
+    return Test-HttpConnectProxy -Proxy $normalized -TimeoutMilliseconds $TimeoutMilliseconds
 }
 
-function Get-ListeningProxyCandidates {
+function Get-PreferredProxyCandidates {
     $candidates = New-Object System.Collections.Generic.List[string]
     $preferredHttpPorts = @(7890, 7891, 7892, 7893, 7897, 7899, 20170, 7688)
     $preferredSocksPorts = @(1080, 10808, 10809)
@@ -240,83 +256,46 @@ function Get-ListeningProxyCandidates {
         [void]$candidates.Add("http://127.0.0.1:$port")
     }
 
+    return $candidates
+}
+
+function Get-AllLoopbackProxyCandidates {
+    $listeners = New-Object System.Collections.Generic.List[string]
+
     try {
         $lines = & netstat -ano -p tcp 2>$null
     } catch {
-        return $candidates
+        return @()
     }
 
-    $proxyProcessPattern = "clash|mihomo|verge|v2ray|xray|sing|nekoray|hiddify|proxy|vpn|tun|core|surge|loon"
     foreach ($line in $lines) {
-        if ($line -notmatch "^\s*TCP\s+(?<host>127\.0\.0\.1|0\.0\.0\.0|\[::1\]|\[::\]):(?<port>\d+)\s+\S+\s+LISTENING\s+(?<pid>\d+)\s*$") {
+        if ($line -notmatch "^\s*TCP\s+(?<host>127\.0\.0\.1|0\.0\.0\.0|\[::1\]|\[::\]):(?<port>\d+)\s+\S+\s+LISTENING\s+\d+\s*$") {
             continue
         }
 
         $port = [int]$Matches.port
         if ($port -lt 1024) { continue }
 
-        $processName = ""
-        $processPath = ""
-        $process = Get-Process -Id ([int]$Matches.pid) -ErrorAction SilentlyContinue
-        if ($process) {
-            $processName = [string]$process.ProcessName
-            try { $processPath = [string]$process.Path } catch { $processPath = "" }
+        $loopbackHost = "127.0.0.1"
+        if ($Matches.host -in @("[::1]", "[::]")) {
+            $loopbackHost = "[::1]"
         }
 
-        if (($processName -match $proxyProcessPattern) -or ($processPath -match $proxyProcessPattern) -or ($preferredHttpPorts -contains $port) -or ($preferredSocksPorts -contains $port)) {
-            [void]$candidates.Add("http://127.0.0.1:$port")
-            [void]$candidates.Add("socks5://127.0.0.1:$port")
-        }
+        [void]$listeners.Add("${loopbackHost}:$port")
     }
 
-    return $candidates
-}
+    $uniqueListeners = @($listeners | Select-Object -Unique)
 
-function Get-ProxyConfigCandidates {
-    $roots = @($env:APPDATA, $env:LOCALAPPDATA, $env:PROGRAMDATA) |
-        Where-Object { $_ -and (Test-Path -LiteralPath $_) }
-    $namePattern = "clash|mihomo|verge|v2ray|xray|sing|nekoray|hiddify|proxy|vpn|surge|loon"
-
-    foreach ($root in $roots) {
-        $dirs = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match $namePattern } |
-            Select-Object -First 20
-
-        foreach ($dir in $dirs) {
-            $files = Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -Include "*.yaml", "*.yml", "*.json", "*.toml", "*.ini", "*.conf" -ErrorAction SilentlyContinue |
-                Select-Object -First 80
-
-            foreach ($file in $files) {
-                try {
-                    $config = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop
-                } catch {
-                    continue
-                }
-                if ([string]::IsNullOrWhiteSpace($config)) { continue }
-
-                $patterns = @(
-                    @{ Scheme = "http"; Pattern = "(?im)^\s*mixed-port\s*[:=]\s*(?<port>\d+)\s*$" },
-                    @{ Scheme = "http"; Pattern = "(?im)^\s*http-port\s*[:=]\s*(?<port>\d+)\s*$" },
-                    @{ Scheme = "http"; Pattern = "(?im)^\s*port\s*[:=]\s*(?<port>\d+)\s*$" },
-                    @{ Scheme = "socks5"; Pattern = "(?im)^\s*socks-port\s*[:=]\s*(?<port>\d+)\s*$" },
-                    @{ Scheme = "http"; Pattern = "(?im)`"mixed-port`"\s*:\s*(?<port>\d+)" },
-                    @{ Scheme = "http"; Pattern = "(?im)`"http-port`"\s*:\s*(?<port>\d+)" },
-                    @{ Scheme = "http"; Pattern = "(?im)`"port`"\s*:\s*(?<port>\d+)" },
-                    @{ Scheme = "socks5"; Pattern = "(?im)`"socks-port`"\s*:\s*(?<port>\d+)" }
-                )
-
-                foreach ($entry in $patterns) {
-                    foreach ($match in [regex]::Matches($config, $entry.Pattern)) {
-                        "{0}://127.0.0.1:{1}" -f $entry.Scheme, $match.Groups["port"].Value
-                    }
-                }
-            }
-        }
-    }
+    # Probe every listener for the cheap local SOCKS handshake first. HTTP
+    # CONNECT is a second pass because it may wait for an upstream connection.
+    foreach ($listener in $uniqueListeners) { "socks5://$listener" }
+    foreach ($listener in $uniqueListeners) { "http://$listener" }
 }
 
 function Resolve-CodexProxyEndpoint {
     param([string]$OverrideProxy)
+
+    $testedCandidates = New-Object "System.Collections.Generic.HashSet[string]" ([System.StringComparer]::OrdinalIgnoreCase)
 
     $sources = @(
         @{ Name = "manual -Proxy argument"; Value = $OverrideProxy },
@@ -327,31 +306,29 @@ function Resolve-CodexProxyEndpoint {
 
     foreach ($source in $sources) {
         $candidate = Normalize-ProxyEndpoint $source.Value
+        if ($candidate) { [void]$testedCandidates.Add($candidate) }
         if ($candidate -and (Test-ProxyEndpoint $candidate)) {
             Write-Host ("Detected proxy from {0}: {1}" -f $source.Name, $candidate)
             return $candidate
         }
     }
 
-    foreach ($candidate in (Get-ListeningProxyCandidates | Where-Object { $_ } | Select-Object -Unique)) {
+    foreach ($candidate in (Get-PreferredProxyCandidates | Where-Object { $_ } | Select-Object -Unique)) {
         $normalized = Normalize-ProxyEndpoint $candidate
+        if ($normalized -and -not $testedCandidates.Add($normalized)) { continue }
         if ($normalized -and (Test-ProxyEndpoint $normalized)) {
-            Write-Host "Detected proxy by local port probing: $normalized"
+            Write-Host "Detected proxy on a conventional local port: $normalized"
             return $normalized
         }
     }
 
-    try {
-        $configCandidates = Get-ProxyConfigCandidates
-    } catch {
-        Write-Host "Proxy config scan failed. Continuing."
-        $configCandidates = @()
-    }
-
-    foreach ($candidate in ($configCandidates | Where-Object { $_ } | Select-Object -Unique)) {
+    Write-Host "No proxy found in known settings. Probing loopback listeners by protocol..."
+    foreach ($candidate in (Get-AllLoopbackProxyCandidates | Where-Object { $_ } | Select-Object -Unique)) {
         $normalized = Normalize-ProxyEndpoint $candidate
-        if ($normalized -and (Test-ProxyEndpoint $normalized)) {
-            Write-Host "Detected proxy from local config: $normalized"
+        if ($normalized -and -not $testedCandidates.Add($normalized)) { continue }
+        $probeTimeout = if ($normalized -match "^socks") { 300 } else { 1000 }
+        if ($normalized -and (Test-ProxyEndpoint -Proxy $normalized -TimeoutMilliseconds $probeTimeout)) {
+            Write-Host "Detected proxy by generic loopback protocol probing: $normalized"
             return $normalized
         }
     }

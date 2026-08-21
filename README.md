@@ -12,7 +12,9 @@ This repository contains the source files used to build a protected Start-Codex-
 
 ## Current Behavior
 
-- The launcher detects a usable local proxy for Codex.
+- The launcher detects a usable local proxy from explicit arguments, Windows/WinHTTP settings, existing proxy environment variables, or conventional local ports.
+- If those fast paths do not find one, it protocol-probes all active loopback listeners for HTTP CONNECT and SOCKS5; detection does not depend on a VPN vendor or process name.
+- A saved Windows proxy endpoint is considered even when the Windows proxy switch is off, but it is used only after a live protocol check succeeds.
 - Proxy environment variables are set only for the launcher process and the Codex process it starts.
 - The launcher does not modify Windows system proxy settings.
 - The launcher does not write user or machine proxy environment variables.
